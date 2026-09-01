@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,15 @@ function runConvergeAttempt(args: string[], cwd = fileURLToPath(new URL('../..',
   );
 }
 
+function runCli(args: string[], cwd = fileURLToPath(new URL('../..', import.meta.url))) {
+  return spawnSync(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    timeout: 10_000,
+  });
+}
+
 afterEach(() => {
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -40,27 +49,30 @@ afterEach(() => {
 });
 
 describe('converge-attempt CLI', () => {
-  it('emits structured JSON and exit 3 for an invalid cap', () => {
-    const result = runConvergeAttempt(['--target', 'rcl-test', '--max-attempts', '0']);
+  it('accepts the deprecated cap option as an ignored compatibility no-op', () => {
+    const repository = tempRepository();
+    const first = runConvergeAttempt(
+      ['--target', 'rcl-test', '--max-attempts', '1'],
+      repository
+    );
+    const second = runConvergeAttempt(
+      ['--target', 'rcl-test', '--max-attempts', '0'],
+      repository
+    );
 
-    expect(result.status).toBe(3);
-    expect(result.stdout).toBe('');
-    expect(JSON.parse(result.stderr)).toEqual({
-      error: {
-        code: 'RCL_CONVERGE_ATTEMPT_STATE',
-        message: 'maxAttempts (--max-attempts) must be a positive safe integer.',
-      },
-    });
+    expect(first.status).toBe(0);
+    expect(second.status).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({ attempt: 1, attemptsUsed: 1 });
+    expect(JSON.parse(second.stdout)).toMatchObject({ attempt: 2, attemptsUsed: 2 });
+    expect(JSON.parse(second.stdout)).not.toHaveProperty('cap');
   });
 
-  it('emits structured JSON when the cap option has no value', () => {
-    const result = runConvergeAttempt(['--target', 'rcl-test', '--max-attempts']);
+  it('accepts the deprecated cap option without a value', () => {
+    const repository = tempRepository();
+    const result = runConvergeAttempt(['--target', 'rcl-test', '--max-attempts'], repository);
 
-    expect(result.status).toBe(3);
-    expect(result.stdout).toBe('');
-    expect(JSON.parse(result.stderr)).toMatchObject({
-      error: { code: 'RCL_CONVERGE_ATTEMPT_STATE' },
-    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ attempt: 1, attemptsUsed: 1 });
   });
 
   it('emits structured JSON and exit 3 when the target is missing', () => {
@@ -89,12 +101,9 @@ describe('converge-attempt CLI', () => {
     });
   });
 
-  it('emits exit 0 for a claim and exit 2 at the persisted consent boundary', () => {
+  it('emits exit 0 for every persisted claim without a cap field', () => {
     const repository = tempRepository();
-    const claimed = runConvergeAttempt(
-      ['--target', 'rcl-cli-test', '--max-attempts', '1'],
-      repository
-    );
+    const claimed = runConvergeAttempt(['--target', 'rcl-cli-test'], repository);
 
     expect(claimed.status).toBe(0);
     expect(claimed.stderr).toBe('');
@@ -102,19 +111,56 @@ describe('converge-attempt CLI', () => {
       target: 'rcl-cli-test',
       attempt: 1,
       attemptsUsed: 1,
-      cap: 1,
     });
+    expect(JSON.parse(claimed.stdout)).not.toHaveProperty('cap');
 
-    const refused = runConvergeAttempt(['--target', 'rcl-cli-test'], repository);
-    expect(refused.status).toBe(2);
-    expect(refused.stdout).toBe('');
-    expect(JSON.parse(refused.stderr)).toMatchObject({
-      error: {
-        code: 'RCL_CONVERGE_ATTEMPT_CAP',
-        target: 'rcl-cli-test',
-        attemptsUsed: 1,
-        cap: 1,
-      },
-    });
+    const next = runConvergeAttempt(['--target', 'rcl-cli-test'], repository);
+    expect(next.status).toBe(0);
+    expect(JSON.parse(next.stdout)).toMatchObject({ attempt: 2, attemptsUsed: 2 });
+  });
+
+  it('does not advertise a numerical stopping option', () => {
+    const help = runCli(['converge-attempt', '--help']);
+
+    expect(help.status).toBe(0);
+    expect(help.stdout).not.toContain('--max-attempts');
+    expect(help.stdout).not.toMatch(/cap|budget/i);
+  });
+});
+
+describe('converge-report CLI', () => {
+  it('accepts the deprecated round option as an ignored no-op above 99', () => {
+    const repository = tempRepository();
+    const report = join(repository, 'report.json');
+    writeFileSync(report, `${JSON.stringify({ findings: [] })}\n`);
+
+    const result = runCli(
+      [
+        'converge-report',
+        '--json',
+        '--target',
+        'rcl-cli-report',
+        '--report',
+        report,
+        '--round',
+        '100',
+        '--max-rounds',
+        '2',
+      ],
+      repository
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({ target: 'rcl-cli-report', round: 100 });
+    expect(JSON.parse(result.stdout)).not.toHaveProperty('roundCap');
+  });
+
+  it('does not advertise a numerical stopping option', () => {
+    const help = runCli(['converge-report', '--help']);
+
+    expect(help.status).toBe(0);
+    expect(help.stdout).not.toContain('--max-rounds');
+    expect(help.stdout).not.toMatch(/cap/i);
   });
 });

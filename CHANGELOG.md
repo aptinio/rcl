@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **RCL-35: convergence review caps are permanently removed.** Attempt claims
+  and evidence rounds retain durable, atomic telemetry and strict sequencing,
+  but accumulated counts no longer stop a healthy loop or require renewed
+  consent. Historical state carrying the former cap fields resumes uncapped,
+  and the old override options are hidden compatibility no-ops.
+- Generated convergence skills now continue until convergence or a genuine
+  blocker. Reviewer health, stale-head rejection, process timeouts,
+  authorization checks, and exact-head quality gates are unchanged.
+
 ## 2.1.1
 
 Dismissals are terminal (RCL-30). The 2.0.0 regating rule — a dismissed

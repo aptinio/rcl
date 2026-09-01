@@ -1,15 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DEFAULT_CONVERGE_ROUND_CAP,
-  HARD_CONVERGE_ROUND_CAP,
-  validateRoundCap,
+  convergeRunStatePath,
   processRoundReport,
   recordVerdicts,
   loadConvergeRunState,
-  ConvergeRoundCapError,
   ConvergeRunStateError,
 } from '../../src/converge/run-state.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
@@ -53,22 +50,9 @@ function finding(over: Partial<ConsensusFinding> & { models?: string[] } = {}): 
   };
 }
 
-describe('round cap policy (RCL-24)', () => {
-  it('defaults to 15 rounds with a hard cap of 99', () => {
-    expect(DEFAULT_CONVERGE_ROUND_CAP).toBe(15);
-    expect(HARD_CONVERGE_ROUND_CAP).toBe(99);
-  });
-
-  it('accepts caps between 2 and 99 and rejects everything else', () => {
-    expect(validateRoundCap(2)).toBe(2);
-    expect(validateRoundCap(99)).toBe(99);
-    expect(() => validateRoundCap(1)).toThrow(/2/);
-    expect(() => validateRoundCap(100)).toThrow(/99/);
-    expect(() => validateRoundCap(0)).toThrow();
-  });
-
-  it('refuses to process a round beyond the default consent boundary', async () => {
-    for (let round = 1; round <= DEFAULT_CONVERGE_ROUND_CAP; round++) {
+describe('round telemetry (RCL-35)', () => {
+  it('accepts contiguous rounds beyond the former default and hard boundaries', async () => {
+    for (let round = 1; round <= 101; round++) {
       await processRoundReport({
         gitCommonDir: dir,
         target: 't1',
@@ -76,39 +60,79 @@ describe('round cap policy (RCL-24)', () => {
         findings: [finding()],
       });
     }
-    await expect(
-      processRoundReport({
-        gitCommonDir: dir,
-        target: 't1',
-        round: DEFAULT_CONVERGE_ROUND_CAP + 1,
-        findings: [],
-      })
-    ).rejects.toThrow(ConvergeRoundCapError);
+    const state = await loadConvergeRunState(dir, 't1');
+    expect(state?.rounds).toHaveLength(101);
+    expect(state?.rounds.at(-1)?.round).toBe(101);
+  });
 
-    // Explicit override extends past the boundary…
-    await processRoundReport({
-      gitCommonDir: dir,
-      target: 't1',
-      round: DEFAULT_CONVERGE_ROUND_CAP + 1,
-      maxRounds: DEFAULT_CONVERGE_ROUND_CAP + 2,
-      findings: [],
-    });
-    await processRoundReport({
-      gitCommonDir: dir,
-      target: 't1',
-      round: DEFAULT_CONVERGE_ROUND_CAP + 2,
-      findings: [],
-    });
-    // …but never past the configured cap.
+  it('loads historical state containing a round cap and continues uncapped in place', async () => {
+    const stateFile = convergeRunStatePath(dir, 'historical');
+    await mkdir(join(dir, 'rcl-converge-runs'), { recursive: true });
+    await writeFile(
+      stateFile,
+      `${JSON.stringify({
+        version: 1,
+        target: 'historical',
+        roundCap: 15,
+        rounds: Array.from({ length: 99 }, (_, index) => ({
+          round: index + 1,
+          counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 },
+        })),
+        findings: {},
+        updatedAt: '2026-08-15T12:00:00Z',
+      })}\n`
+    );
+
     await expect(
       processRoundReport({
         gitCommonDir: dir,
-        target: 't1',
-        round: DEFAULT_CONVERGE_ROUND_CAP + 3,
-        maxRounds: DEFAULT_CONVERGE_ROUND_CAP + 2,
+        target: 'historical',
+        round: 100,
         findings: [],
       })
-    ).rejects.toThrow(ConvergeRoundCapError);
+    ).resolves.toMatchObject({ counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
+    const state = await loadConvergeRunState(dir, 'historical');
+    expect(state?.rounds).toHaveLength(100);
+    expect(state?.rounds.at(-1)?.round).toBe(100);
+  });
+
+  it('retains strict contiguous sequencing above the former hard boundary', async () => {
+    await processRoundReport({ gitCommonDir: dir, target: 'ordered-high', round: 100, findings: [] });
+    await expect(
+      processRoundReport({
+        gitCommonDir: dir,
+        target: 'ordered-high',
+        round: 102,
+        findings: [],
+      })
+    ).rejects.toThrow(ConvergeRunStateError);
+  });
+
+  it('atomically persists concurrent re-reports above the former hard boundary', async () => {
+    await processRoundReport({ gitCommonDir: dir, target: 'concurrent-high', round: 100, findings: [] });
+    const reports = await Promise.allSettled(
+      Array.from({ length: 20 }, (_, index) =>
+        processRoundReport({
+          gitCommonDir: dir,
+          target: 'concurrent-high',
+          round: 100,
+          findings: [
+            finding({
+              startLine: index * 20 + 1,
+              endLine: index * 20 + 2,
+              title: `concurrent finding ${index}`,
+            }),
+          ],
+        })
+      )
+    );
+
+    expect(reports.every((report) => report.status === 'fulfilled')).toBe(true);
+    const state = await loadConvergeRunState(dir, 'concurrent-high');
+    expect(state?.rounds).toEqual([
+      { round: 100, counts: { new: 1, repeat: 0, suppressed: 0, regating: 0 } },
+    ]);
+    expect(Object.keys(state?.findings ?? {})).toHaveLength(20);
   });
 });
 
@@ -139,15 +163,15 @@ describe('round ordering and re-runs (RCL-24)', () => {
     ).rejects.toThrow(ConvergeRunStateError);
     // Round 3 would be next; there is no recorded round 3 yet, so 4 skips.
     await expect(
-      processRoundReport({ gitCommonDir: dir, target: 'rr2', round: 4, maxRounds: 5, findings: [] })
+      processRoundReport({ gitCommonDir: dir, target: 'rr2', round: 4, findings: [] })
     ).rejects.toThrow(ConvergeRunStateError);
   });
 
-  it('a fresh state adopts a mid-run round from a resumed pre-upgrade ledger', async () => {
+  it('a fresh state adopts a high mid-run round from a resumed pre-upgrade ledger', async () => {
     const r = await processRoundReport({
       gitCommonDir: dir,
       target: 'rr3',
-      round: 3,
+      round: 100,
       findings: [finding()],
     });
     expect(r.counts.new).toBe(1);

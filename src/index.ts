@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command, InvalidArgumentError } from 'commander';
+import { Command, InvalidArgumentError, Option } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
@@ -64,20 +64,14 @@ import type { Config } from './config/schema.js';
 import type { Role } from './roles/types.js';
 import type { Diff } from './resolver/types.js';
 import {
-  DEFAULT_CONVERGE_ATTEMPT_CAP,
   claimConvergeAttempt,
-  ConvergeAttemptBudgetExceededError,
-  convergeAttemptErrorExitCode,
   ConvergeAttemptStateError,
   resolveGitCommonDir,
 } from './converge/attempt-budget.js';
 import {
-  DEFAULT_CONVERGE_ROUND_CAP,
-  HARD_CONVERGE_ROUND_CAP,
   processRoundReport,
   recordVerdicts,
   findingGatingReason,
-  ConvergeRoundCapError,
   ConvergeRunStateError,
 } from './converge/run-state.js';
 import {
@@ -204,48 +198,33 @@ program
     await runDiscuss(question, opts);
   });
 
-// Machine-enforced cost/safety guard used by the rcl-converge workflow.
+// Durable launch telemetry used by the rcl-converge workflow.
 program
   .command('converge-attempt')
-  .description('Atomically consume one persisted rcl-converge attempt before starting a review')
-  // Optional-value syntax is deliberate: Commander otherwise exits before
-  // the action, preventing --json callers from receiving structured errors
-  // for a missing value. The action enforces both values as required.
+  .description('Atomically record one persisted rcl-converge attempt before starting a review')
+  // Optional-value syntax lets the action return a structured --json error
+  // when --target is present without a value.
   .option('--target [key]', 'Required stable repository-and-PR/branch convergence target key')
-  .option(
-    '--max-attempts [n]',
-    `Explicit per-target cap override (default ${DEFAULT_CONVERGE_ATTEMPT_CAP} for a new target)`
-  )
+  .addOption(new Option('--max-attempts [n]').hideHelp())
   .option('--json', 'Output the claim as JSON')
   .action(
     async (opts: {
       target?: string | boolean;
-      maxAttempts?: string | boolean;
       json?: boolean;
     }) => {
       try {
         if (typeof opts.target !== 'string' || opts.target.trim() === '') {
           throw new ConvergeAttemptStateError('--target is required.');
         }
-        let maxAttempts: number | undefined;
-        if (opts.maxAttempts !== undefined) {
-          maxAttempts = typeof opts.maxAttempts === 'string' ? Number(opts.maxAttempts) : NaN;
-          if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
-            throw new ConvergeAttemptStateError(
-              'maxAttempts (--max-attempts) must be a positive safe integer.'
-            );
-          }
-        }
         const claim = await claimConvergeAttempt({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
-          maxAttempts,
         });
         if (opts.json) {
           console.log(JSON.stringify(claim));
         } else {
           console.log(
-            `Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}. ` +
+            `Convergence attempt ${claim.attempt} claimed for ${claim.target}. ` +
               `State: ${claim.stateFile}`
           );
           if (claim.warning) console.error(chalk.yellow(claim.warning));
@@ -253,54 +232,43 @@ program
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const code =
-          err instanceof ConvergeAttemptBudgetExceededError
+          err instanceof ConvergeAttemptStateError
             ? err.code
-            : err instanceof ConvergeAttemptStateError
-              ? err.code
-              : 'RCL_CONVERGE_ATTEMPT_ERROR';
+            : 'RCL_CONVERGE_ATTEMPT_ERROR';
         if (opts.json) {
           console.error(
             JSON.stringify({
               error: {
                 code,
                 message,
-                ...(err instanceof ConvergeAttemptBudgetExceededError
-                  ? { attemptsUsed: err.attemptsUsed, cap: err.cap, target: err.target }
-                  : {}),
               },
             })
           );
         } else {
           console.error(chalk.red(message));
         }
-        // Exit 2 is the expected consent boundary. Exit 3 means accounting or
-        // infrastructure failed and raising the cap is not the remediation.
-        process.exitCode = convergeAttemptErrorExitCode(err);
+        process.exitCode = 3;
       }
     }
   );
 
 
-// Cross-round finding identity + machine-enforced round cap (RCL-24).
+// Cross-round finding identity and durable sequencing (RCL-24/RCL-35).
 program
   .command('converge-report')
   .description(
-    'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating'
+    'Dedupe a round report against the converge run state and classify findings as new/repeat/suppressed/regating'
   )
   .option('--target [key]', 'Stable convergence target key (same key as converge-attempt)')
   .option('--report [path]', 'Round report JSON (a --json-file output)')
   .option('--round [n]', 'Evidence round number (1-based)')
-  .option(
-    '--max-rounds [n]',
-    `Round cap override (default ${DEFAULT_CONVERGE_ROUND_CAP}, hard maximum ${HARD_CONVERGE_ROUND_CAP})`
-  )
+  .addOption(new Option('--max-rounds [n]').hideHelp())
   .option('--json', 'Output JSON')
   .action(
     async (opts: {
       target?: string | boolean;
       report?: string | boolean;
       round?: string | boolean;
-      maxRounds?: string | boolean;
       json?: boolean;
     }) => {
       try {
@@ -314,16 +282,6 @@ program
         if (!Number.isSafeInteger(round) || round < 1) {
           throw new ConvergeRunStateError('--round must be a positive integer.');
         }
-        let maxRounds: number | undefined;
-        if (opts.maxRounds !== undefined) {
-          maxRounds = typeof opts.maxRounds === 'string' ? Number(opts.maxRounds) : NaN;
-          if (!Number.isSafeInteger(maxRounds)) {
-            throw new ConvergeRunStateError(
-              `--max-rounds must be an integer between 2 and ${HARD_CONVERGE_ROUND_CAP}.`
-            );
-          }
-        }
-
         let report: ReviewResult;
         try {
           report = JSON.parse(await readFile(opts.report, 'utf-8')) as ReviewResult;
@@ -341,7 +299,6 @@ program
           target: opts.target,
           round,
           findings: report.findings,
-          ...(maxRounds !== undefined ? { maxRounds } : {}),
         });
 
         const classified = result.findings.map((f) => ({
@@ -365,7 +322,6 @@ program
               {
                 target: opts.target,
                 round,
-                roundCap: result.roundCap,
                 counts: result.counts,
                 actionableGating: actionable.length,
                 findings: classified,
@@ -378,7 +334,7 @@ program
         }
 
         console.log(
-          `Round ${round}/${result.roundCap} for ${opts.target}: ` +
+          `Round ${round} for ${opts.target}: ` +
             `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
             `${result.counts.suppressed} suppressed, ${result.counts.regating} regating · ` +
             `${actionable.length} actionable gating finding(s)`
@@ -395,16 +351,14 @@ program
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
           const code =
-            err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
+            err instanceof ConvergeRunStateError
               ? err.code
               : 'RCL_CONVERGE_REPORT_ERROR';
           console.error(JSON.stringify({ error: { code, message } }));
         } else {
           console.error(chalk.red(message));
         }
-        // Exit 2 = round-cap consent boundary (mirrors converge-attempt);
-        // exit 3 = state/infrastructure failure.
-        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : 3;
+        process.exitCode = 3;
       }
     }
   );

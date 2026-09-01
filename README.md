@@ -155,35 +155,22 @@ rcl roles show <name>      # Show system prompt and details for a role
 
 ### `rcl converge-attempt`
 
-Machine-enforced safety guard used by the generated `rcl-converge` skill.
-Each call atomically and durably consumes one per-target attempt under the
-repository's common Git directory, so the budget survives sessions, linked
-worktrees, and abrupt system restarts.
-New targets default to twenty attempts, but an explicit invocation can set any
-positive cap with `--max-attempts`. Omitting the flag on resume preserves the
-persisted cap. At the boundary, RCL refuses before provider calls and directs
-the workflow to ask the user; an approved continuation explicitly supplies a
-higher cap.
-
-At the skill level, `--max-attempts N` controls this machine launch budget.
-The separate `--max-rounds N` flag caps evidence rounds and is machine-enforced
-by `rcl converge-report` (default 15, valid range 2–99; rounds past 99 are
-impossible under any flag). The default is a consent boundary, not a stop: at
-15 rounds the workflow asks the user, and an approved continuation supplies a
-higher `--max-rounds`.
+Durable launch telemetry used by the generated `rcl-converge` skill. Each call
+atomically records one per-target attempt under the repository's common Git
+directory, so the count survives sessions, linked worktrees, and abrupt system
+restarts. Every valid claim is recorded regardless of the accumulated attempt
+count; counts never stop a healthy convergence loop or require renewed consent.
 
 Full-fleet reviewer completion is not required. For the generated
 `rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
 when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Every timeout or
 error must be disclosed, and a result below that threshold is inconclusive.
 
-Exit code 2 means the configured cap was exhausted and explicit continuation
-approval is required. Exit code 3 means attempt accounting itself failed
-(state, lock, Git, filesystem, or another infrastructure error); increasing
-the cap is not the remedy. With `--json`, failures are emitted as structured
-JSON on stderr. If the attempt is durably recorded but final lock release
-fails, the claim still succeeds with a warning so retrying cannot spend a
-second slot for the same intended launch.
+Exit code 3 means attempt accounting itself failed (state, lock, Git,
+filesystem, or another infrastructure error). With `--json`, failures are
+emitted as structured JSON on stderr. If the attempt is durably recorded but
+final lock release fails, the claim still succeeds with a warning so retrying
+cannot record the same intended launch twice.
 
 The short accounting mutex is fully written as a private owner file and then
 published with an exclusive hard link, which cannot replace an existing file
@@ -197,11 +184,13 @@ an evidence ledger seeds only its highest recorded round: historical failed or
 missing-report launches cannot be reconstructed, while every claim after the
 machine state is created is counted exactly. The state remains a same-user
 local safety mechanism, not a tamper-proof store: deliberately deleting
-`.git/rcl-converge-attempts` is an explicit policy bypass.
+`.git/rcl-converge-attempts` discards telemetry and is unsupported. Historical
+state containing a `cap` field loads in place and continues uncapped. The old
+`--max-attempts` option is accepted as an ignored, hidden compatibility no-op;
+it cannot reinstate a stopping boundary.
 
 ```bash
-rcl converge-attempt --target owner-repo-123                 # default/persisted cap
-rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit override
+rcl converge-attempt --target owner-repo-123
 ```
 
 ---
@@ -218,9 +207,11 @@ models rephrase ~98% of them between rounds). Each finding is classified
 `new`, `repeat`, `suppressed` (previously dismissed — a dismissal is terminal
 on its evidence and fresh corroboration alone never reopens it), or `regating`
 (previously dismissed at non-critical severity, now sighted as critical —
-genuinely new evidence). The same call enforces the evidence-round cap:
-default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
-code 2 is the cap consent boundary; exit 3 is a state failure.
+genuinely new evidence). The call enforces strict contiguous round sequencing
+but no numerical stopping limit. Historical state containing `roundCap` loads
+in place and continues uncapped. The old `--max-rounds` option is accepted as
+an ignored, hidden compatibility no-op; it cannot reinstate a stopping
+boundary. State and sequencing failures exit 3.
 
 `converge-verdict` records triage outcomes per finding identity —
 `--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which

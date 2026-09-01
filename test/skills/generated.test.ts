@@ -51,7 +51,7 @@ describe('generated skill files', () => {
     }
   });
 
-  it('machine-claims every convergence attempt before launching a review', () => {
+  it('machine-claims every convergence attempt without a numerical stopping condition', () => {
     const convergeSkills = (renderAll() as Rendered[]).filter(({ path }) =>
       path.replaceAll('\\', '/').includes('/rcl-converge/')
     );
@@ -59,7 +59,7 @@ describe('generated skill files', () => {
 
     for (const { path, content } of convergeSkills) {
       const normalizedPath = path.replaceAll('\\', '/');
-      const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
+      const claimCommand = "rcl converge-attempt --target '<TARGET>'";
       const claimCount = content.split(claimCommand).length - 1;
       const claim = content.indexOf(claimCommand);
       const launch = content.indexOf('rcl review <target>');
@@ -68,10 +68,11 @@ describe('generated skill files', () => {
       expect(launch, path).toBeGreaterThan(-1);
       expect(launch, path).toBeGreaterThan(claim);
       expect(content, path).toContain('Bash(rcl converge-attempt:*)');
-      expect(content, path).toMatch(/cost cap defaults to 20/);
-      expect(content, path).toContain('`--max-rounds <N>`');
-      expect(content, path).toContain('`--max-attempts <N>`');
-      expect(content, path).toMatch(/Exit 2 is the configured consent boundary/i);
+      expect(content, path).not.toContain('--max-rounds');
+      expect(content, path).not.toContain('--max-attempts');
+      expect(content, path).not.toMatch(/\b(?:15|20|99)[ -](?:round|attempt)/i);
+      expect(content, path).toMatch(/counts? (?:are|remain) telemetry/i);
+      expect(content, path).toMatch(/convergence or a genuine blocker/i);
       expect(content, path).toMatch(/Exit 3 is an accounting\/infrastructure failure/i);
       expect(content, path).toMatch(/Never terminate a live council/i);
       expect(content, path).toContain('failed to remove stale review artifacts');

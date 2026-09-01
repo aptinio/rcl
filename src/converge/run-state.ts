@@ -7,41 +7,25 @@ import {
   matchFinding,
   type IdentityEntry,
 } from './finding-identity.js';
+import {
+  acquireConvergeStateLock,
+  releaseConvergeStateLock,
+  type ConvergeStateLockOwner,
+} from './attempt-budget.js';
 
 /**
- * Per-converge-run state (RCL-24): the machine-enforced round cap and the
- * cross-round finding ledger (identity, verdicts, suppression). Lives next
- * to the attempt budget in the repository's common git dir — durable across
+ * Per-converge-run state (RCL-24): durable round sequencing and the cross-round
+ * finding ledger (identity, verdicts, suppression). Lives next to attempt
+ * telemetry in the repository's common git dir — durable across
  * sessions, repo-scoped, not world-writable. The converge target lock
  * serializes writers per target at the workflow level.
  */
 
-export const DEFAULT_CONVERGE_ROUND_CAP = 15;
-export const HARD_CONVERGE_ROUND_CAP = 99;
-export const MIN_CONVERGE_ROUNDS = 2;
-
 const STATE_VERSION = 1;
 const STATE_DIR = 'rcl-converge-runs';
 const DEFAULT_LINE_WINDOW = 5;
-
-export class ConvergeRoundCapError extends Error {
-  readonly code = 'RCL_CONVERGE_ROUND_CAP';
-
-  constructor(
-    readonly target: string,
-    readonly round: number,
-    readonly cap: number
-  ) {
-    super(
-      round > HARD_CONVERGE_ROUND_CAP
-        ? `Round ${round} for ${target} exceeds the hard cap of ${HARD_CONVERGE_ROUND_CAP} rounds — no override exists. ` +
-          `A target still not converged after ${HARD_CONVERGE_ROUND_CAP} rounds needs human review, not more sampling (RCL-29).`
-        : `Round ${round} for ${target} exceeds the configured cap of ${cap} rounds — ask the user whether to continue. ` +
-          `With explicit approval, an explicit --max-rounds (up to ${HARD_CONVERGE_ROUND_CAP}) extends it.`
-    );
-    this.name = 'ConvergeRoundCapError';
-  }
-}
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_LOCK_RETRY_MS = 10;
 
 export class ConvergeRunStateError extends Error {
   readonly code = 'RCL_CONVERGE_RUN_STATE';
@@ -50,21 +34,6 @@ export class ConvergeRunStateError extends Error {
     super(message, options);
     this.name = 'ConvergeRunStateError';
   }
-}
-
-export function validateRoundCap(maxRounds: number): number {
-  if (
-    !Number.isSafeInteger(maxRounds) ||
-    maxRounds < MIN_CONVERGE_ROUNDS ||
-    maxRounds > HARD_CONVERGE_ROUND_CAP
-  ) {
-    throw new ConvergeRunStateError(
-      `--max-rounds must be an integer between ${MIN_CONVERGE_ROUNDS} and ${HARD_CONVERGE_ROUND_CAP} ` +
-        `(the loop runs until convergence, asking at ${DEFAULT_CONVERGE_ROUND_CAP} rounds by default; ` +
-        `past ${HARD_CONVERGE_ROUND_CAP} rounds a human takes over).`
-    );
-  }
-  return maxRounds;
 }
 
 export type FindingVerdict = 'fixed' | 'dismissed';
@@ -101,7 +70,8 @@ export interface RoundCounts {
 export interface ConvergeRunState {
   version: typeof STATE_VERSION;
   target: string;
-  roundCap: number;
+  /** Historical field retained when loading pre-RCL-35 state; never enforced. */
+  roundCap?: number;
   rounds: Array<{ round: number; counts: RoundCounts }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
@@ -127,7 +97,6 @@ export interface AnnotatedRoundFinding {
 }
 
 export interface RoundReport {
-  roundCap: number;
   counts: RoundCounts;
   findings: AnnotatedRoundFinding[];
 }
@@ -140,6 +109,69 @@ function stateBaseName(target: string): string {
 
 export function convergeRunStatePath(gitCommonDir: string, target: string): string {
   return join(resolve(gitCommonDir), STATE_DIR, `${stateBaseName(target)}.json`);
+}
+
+async function withRunStateLock<T>(
+  gitCommonDir: string,
+  target: string,
+  action: () => Promise<T>
+): Promise<T> {
+  const lockFile = `${convergeRunStatePath(gitCommonDir, target)}.lock`;
+  const owner: ConvergeStateLockOwner = {
+    pid: process.pid,
+    claimedAt: new Date().toISOString(),
+    token: randomUUID(),
+  };
+  try {
+    await mkdir(join(resolve(gitCommonDir), STATE_DIR), { recursive: true, mode: 0o700 });
+    await acquireConvergeStateLock(
+      lockFile,
+      DEFAULT_LOCK_TIMEOUT_MS,
+      DEFAULT_LOCK_RETRY_MS,
+      owner
+    );
+  } catch (err) {
+    throw new ConvergeRunStateError(
+      `Could not acquire converge run state lock: ${lockFile}`,
+      { cause: err }
+    );
+  }
+
+  let result: T | undefined;
+  let actionError: unknown;
+  try {
+    result = await action();
+  } catch (err) {
+    actionError = err;
+  }
+
+  let releaseError: unknown;
+  try {
+    await releaseConvergeStateLock(lockFile, owner);
+  } catch (err) {
+    releaseError = err;
+  }
+
+  if (actionError !== undefined) {
+    if (releaseError !== undefined) {
+      const actionMessage = actionError instanceof Error ? actionError.message : String(actionError);
+      const releaseMessage =
+        releaseError instanceof Error ? releaseError.message : String(releaseError);
+      throw new ConvergeRunStateError(
+        `${actionMessage} Run state lock release also failed: ${releaseMessage}`,
+        { cause: releaseError }
+      );
+    }
+    throw actionError;
+  }
+  if (releaseError !== undefined) {
+    throw new ConvergeRunStateError(
+      `Converge run state was persisted but its lock could not be released: ${lockFile}. ` +
+        'Do not retry automatically.',
+      { cause: releaseError }
+    );
+  }
+  return result as T;
 }
 
 async function readState(
@@ -169,7 +201,7 @@ async function readState(
   if (
     state.version !== STATE_VERSION ||
     state.target !== target ||
-    !Number.isSafeInteger(state.roundCap) ||
+    (state.roundCap !== undefined && !Number.isSafeInteger(state.roundCap)) ||
     !Array.isArray(state.rounds) ||
     typeof state.findings !== 'object' ||
     state.findings === null
@@ -214,8 +246,8 @@ export function findingGatingReason(f: { severity: string; gating?: { reason: st
 }
 
 /**
- * Dedupe one round's findings against every prior round of this run,
- * enforce the round cap, and persist the updated identity ledger.
+ * Dedupe one round's findings against every prior round of this run and
+ * persist the updated identity ledger.
  *
  * Suppression rule (RCL-30): a dismissal is terminal on its evidence. A
  * finding DISMISSED in an earlier round stays 'suppressed' no matter how many
@@ -227,14 +259,19 @@ export function findingGatingReason(f: { severity: string; gating?: { reason: st
  * that reopened popular false positives every round — see allocator-one#7774,
  * 24 rounds.)
  */
-export async function processRoundReport(options: {
+export interface ProcessRoundReportOptions {
   gitCommonDir: string;
   target: string;
   round: number;
   findings: ConsensusFinding[];
+  /** Deprecated compatibility input. Numerical review caps are permanently ignored. */
   maxRounds?: number;
   lineWindow?: number;
-}): Promise<RoundReport> {
+}
+
+async function processRoundReportLocked(
+  options: ProcessRoundReportOptions
+): Promise<RoundReport> {
   const target = options.target.trim();
   if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
   if (!Number.isSafeInteger(options.round) || options.round < 1) {
@@ -245,23 +282,13 @@ export async function processRoundReport(options: {
   const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
     version: STATE_VERSION,
     target,
-    roundCap: DEFAULT_CONVERGE_ROUND_CAP,
     rounds: [],
     findings: {},
     updatedAt: new Date().toISOString(),
   };
-  if (options.maxRounds !== undefined) {
-    state.roundCap = validateRoundCap(options.maxRounds);
-  }
-  if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) {
-    // Persist a tightened/extended cap even when this round is refused.
-    if (options.maxRounds !== undefined) await writeState(options.gitCommonDir, state);
-    throw new ConvergeRoundCapError(target, options.round, state.roundCap);
-  }
   // Rounds advance contiguously: the current round may be re-processed (the
-  // skill allows bounded re-runs), the next round may start, and nothing
-  // else — reusing old numbers or skipping ahead would let a loop dodge the
-  // cap's intent. A state with no recorded rounds adopts whatever round the
+  // skill allows re-runs), the next round may start, and nothing else.
+  // A state with no recorded rounds adopts whatever round the
   // resumed ledger is on (pre-upgrade runs have history the state lacks).
   const maxRecorded = state.rounds.reduce((max, r) => Math.max(max, r.round), 0);
   if (maxRecorded > 0 && (options.round < maxRecorded || options.round > maxRecorded + 1)) {
@@ -371,7 +398,17 @@ export async function processRoundReport(options: {
   state.updatedAt = new Date().toISOString();
   await writeState(options.gitCommonDir, state);
 
-  return { roundCap: state.roundCap, counts, findings: annotated };
+  return { counts, findings: annotated };
+}
+
+export async function processRoundReport(
+  options: ProcessRoundReportOptions
+): Promise<RoundReport> {
+  const target = options.target.trim();
+  if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
+  return withRunStateLock(options.gitCommonDir, target, () =>
+    processRoundReportLocked({ ...options, target })
+  );
 }
 
 /**
@@ -406,12 +443,16 @@ export interface RecordVerdictsResult {
  * caller can append them to the global model-stats store, plus the round's
  * resolution when it can be decided.
  */
-export async function recordVerdicts(options: {
+export interface RecordVerdictsOptions {
   gitCommonDir: string;
   target: string;
   round: number;
   verdicts: Array<{ key: string; verdict: FindingVerdict; reason?: string }>;
-}): Promise<RecordVerdictsResult> {
+}
+
+async function recordVerdictsLocked(
+  options: RecordVerdictsOptions
+): Promise<RecordVerdictsResult> {
   const target = options.target.trim();
   const state = await readState(options.gitCommonDir, target);
   if (!state) {
@@ -462,4 +503,14 @@ export async function recordVerdicts(options: {
     };
   }
   return { entries: updated, ...(resolution ? { resolution } : {}) };
+}
+
+export async function recordVerdicts(
+  options: RecordVerdictsOptions
+): Promise<RecordVerdictsResult> {
+  const target = options.target.trim();
+  if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
+  return withRunStateLock(options.gitCommonDir, target, () =>
+    recordVerdictsLocked({ ...options, target })
+  );
 }

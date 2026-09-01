@@ -15,8 +15,6 @@ import {
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
-
 const STATE_VERSION = 2;
 const STATE_DIR = 'rcl-converge-attempts';
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
@@ -34,7 +32,8 @@ export interface ConvergeAttemptRecord {
 export interface ConvergeAttemptState {
   version: typeof STATE_VERSION;
   target: string;
-  cap: number;
+  /** Historical field retained when loading pre-RCL-35 state; never enforced. */
+  cap?: number;
   migratedAttempts: number;
   attemptsUsed: number;
   attempts: ConvergeAttemptRecord[];
@@ -45,26 +44,8 @@ export interface ConvergeAttemptClaim {
   target: string;
   attempt: number;
   attemptsUsed: number;
-  cap: number;
   stateFile: string;
   warning?: string;
-}
-
-export class ConvergeAttemptBudgetExceededError extends Error {
-  readonly code = 'RCL_CONVERGE_ATTEMPT_CAP';
-
-  constructor(
-    readonly target: string,
-    readonly attemptsUsed: number,
-    readonly cap: number
-  ) {
-    super(
-      `Convergence attempt budget exhausted for ${target}: ${attemptsUsed}/${cap} attempts used. ` +
-        'No provider calls were started. Ask the user whether to continue; only after explicit ' +
-        'approval, retry with a higher --max-attempts value.'
-    );
-    this.name = 'ConvergeAttemptBudgetExceededError';
-  }
 }
 
 export class ConvergeAttemptStateError extends Error {
@@ -76,28 +57,23 @@ export class ConvergeAttemptStateError extends Error {
   }
 }
 
-export function convergeAttemptErrorExitCode(err: unknown): 2 | 3 {
-  return err instanceof ConvergeAttemptBudgetExceededError ? 2 : 3;
-}
-
 interface ClaimOptions {
   gitCommonDir: string;
   target: string;
-  maxAttempts?: number;
   now?: () => Date;
   recordPid?: number;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
 }
 
-interface AttemptLockOwner {
+export interface ConvergeStateLockOwner {
   pid: number;
   claimedAt: string;
   token: string;
 }
 
-interface AttemptLockSnapshot {
-  owner: AttemptLockOwner;
+interface ConvergeStateLockSnapshot {
+  owner: ConvergeStateLockOwner;
   dev: bigint;
   ino: bigint;
 }
@@ -108,15 +84,6 @@ function validateTarget(target: string): string {
     throw new ConvergeAttemptStateError('Convergence target must not be empty.');
   }
   return trimmed;
-}
-
-function validateCap(maxAttempts: number): number {
-  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
-    throw new ConvergeAttemptStateError(
-      'maxAttempts (--max-attempts) must be a positive safe integer.'
-    );
-  }
-  return maxAttempts;
 }
 
 function stateBaseName(target: string): string {
@@ -143,8 +110,7 @@ function validateState(value: unknown, expectedTarget: string, stateFile: string
   if (
     state.version !== STATE_VERSION ||
     state.target !== expectedTarget ||
-    !Number.isSafeInteger(state.cap) ||
-    (state.cap ?? 0) < 1 ||
+    (state.cap !== undefined && (!Number.isSafeInteger(state.cap) || state.cap < 1)) ||
     !Number.isSafeInteger(state.migratedAttempts) ||
     (state.migratedAttempts ?? -1) < 0 ||
     !Number.isSafeInteger(state.attemptsUsed) ||
@@ -163,7 +129,7 @@ function validateState(value: unknown, expectedTarget: string, stateFile: string
     )
   ) {
     throw new ConvergeAttemptStateError(
-      `Invalid convergence attempt state in ${stateFile}; refusing to reset the safety budget.`
+      `Invalid convergence attempt state in ${stateFile}; refusing to reset attempt accounting.`
     );
   }
 
@@ -206,7 +172,6 @@ async function stateFromExistingLedger(
   return {
     version: STATE_VERSION,
     target,
-    cap: DEFAULT_CONVERGE_ATTEMPT_CAP,
     migratedAttempts: attemptsUsed,
     attemptsUsed,
     attempts: [],
@@ -230,7 +195,7 @@ async function readState(stateFile: string, target: string): Promise<ConvergeAtt
   } catch (err) {
     if (err instanceof ConvergeAttemptStateError) throw err;
     throw new ConvergeAttemptStateError(
-      `Invalid JSON in ${stateFile}; refusing to reset the safety budget.`,
+      `Invalid JSON in ${stateFile}; refusing to reset attempt accounting.`,
       { cause: err }
     );
   }
@@ -251,9 +216,9 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-function parseLockOwner(raw: string): AttemptLockOwner | undefined {
+function parseLockOwner(raw: string): ConvergeStateLockOwner | undefined {
   try {
-    const parsed = JSON.parse(raw) as Partial<AttemptLockOwner> | null;
+    const parsed = JSON.parse(raw) as Partial<ConvergeStateLockOwner> | null;
     if (
       parsed !== null &&
       typeof parsed === 'object' &&
@@ -265,7 +230,7 @@ function parseLockOwner(raw: string): AttemptLockOwner | undefined {
         parsed.token
       )
     ) {
-      return parsed as AttemptLockOwner;
+      return parsed as ConvergeStateLockOwner;
     }
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
@@ -273,7 +238,7 @@ function parseLockOwner(raw: string): AttemptLockOwner | undefined {
   return undefined;
 }
 
-async function readLockSnapshot(lockFile: string): Promise<AttemptLockSnapshot | undefined> {
+async function readLockSnapshot(lockFile: string): Promise<ConvergeStateLockSnapshot | undefined> {
   let handle;
   try {
     handle = await open(lockFile, 'r');
@@ -332,7 +297,10 @@ async function isPublicationContention(err: unknown, destination: string): Promi
   );
 }
 
-async function tryAcquireOwnedLock(lockFile: string, owner: AttemptLockOwner): Promise<boolean> {
+async function tryAcquireOwnedLock(
+  lockFile: string,
+  owner: ConvergeStateLockOwner
+): Promise<boolean> {
   // Fully write a private regular file, then atomically hard-link it into the
   // canonical path. link(2) never replaces an existing file *or directory*,
   // so this remains safe while an older mkdir-based client is in flight.
@@ -369,7 +337,7 @@ async function tryAcquireOwnedLock(lockFile: string, owner: AttemptLockOwner): P
 
 async function pathMatchesSnapshot(
   path: string,
-  snapshot: AttemptLockSnapshot
+  snapshot: ConvergeStateLockSnapshot
 ): Promise<boolean> {
   try {
     const stats = await lstat(path, { bigint: true });
@@ -382,7 +350,7 @@ async function pathMatchesSnapshot(
 
 async function reclaimStaleLock(
   lockFile: string,
-  staleSnapshot: AttemptLockSnapshot
+  staleSnapshot: ConvergeStateLockSnapshot
 ): Promise<boolean> {
   const current = await readLockSnapshot(lockFile);
   if (
@@ -428,11 +396,11 @@ async function reclaimStaleLock(
   return true;
 }
 
-async function acquireOwnedLock(
+export async function acquireConvergeStateLock(
   lockFile: string,
   timeoutMs: number,
   retryMs: number,
-  owner: AttemptLockOwner
+  owner: ConvergeStateLockOwner
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let waitMs = Math.max(1, retryMs);
@@ -526,7 +494,10 @@ async function writeStateAtomically(stateFile: string, state: ConvergeAttemptSta
   }
 }
 
-async function releaseOwnedLock(lockFile: string, owner: AttemptLockOwner): Promise<void> {
+export async function releaseConvergeStateLock(
+  lockFile: string,
+  owner: ConvergeStateLockOwner
+): Promise<void> {
   const current = await readLockSnapshot(lockFile);
   if (!current || current.owner.token !== owner.token) {
     throw new ConvergeAttemptStateError(
@@ -547,21 +518,19 @@ async function releaseOwnedLock(lockFile: string, owner: AttemptLockOwner): Prom
 }
 
 /**
- * Atomically consume one convergence attempt before a council process starts.
+ * Atomically record one convergence attempt before a council process starts.
  * The claim is intentionally outcome-blind: once returned, a failed launch,
  * timeout, kill, missing report, or inconclusive review has still spent the
- * attempt. This makes the cost ceiling independent of agent bookkeeping.
+ * attempt. Counts are durable telemetry and never stop a healthy loop.
  */
 export async function claimConvergeAttempt(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
   const target = validateTarget(options.target);
-  const requestedCap =
-    options.maxAttempts === undefined ? undefined : validateCap(options.maxAttempts);
   const stateFile = convergeAttemptStatePath(options.gitCommonDir, target);
   const stateDir = join(resolve(options.gitCommonDir), STATE_DIR);
   const lockFile = `${stateFile}.lock`;
   const now = options.now ?? (() => new Date());
   const recordPid = options.recordPid ?? process.pid;
-  const lockOwner: AttemptLockOwner = {
+  const lockOwner: ConvergeStateLockOwner = {
     pid: process.pid,
     claimedAt: now().toISOString(),
     token: randomUUID(),
@@ -573,7 +542,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   // the next invocation must not silently skip the durability barrier merely
   // because mkdir now observes the directory.
   await syncDirectory(dirname(stateDir));
-  await acquireOwnedLock(
+  await acquireConvergeStateLock(
     lockFile,
     options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
     options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
@@ -587,29 +556,12 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     const stored = await readState(stateFile, target);
     const previous = stored ?? (await stateFromExistingLedger(options.gitCommonDir, target, timestamp));
     const attemptsUsed = previous?.attemptsUsed ?? 0;
-    // Omitting --max-attempts preserves an existing target's configured cap.
-    // Supplying it is an explicit invocation-time override: it can raise or
-    // lower the persisted boundary after the workflow has obtained approval.
-    const effectiveCap = requestedCap ?? previous?.cap ?? DEFAULT_CONVERGE_ATTEMPT_CAP;
-    if (attemptsUsed >= effectiveCap) {
-      // Persist a migrated ledger even when it already exhausts the cap, so
-      // later processes do not depend on reparsing mutable prose. Also
-      // persist a newly tightened cap even when the claim itself is refused.
-      if (previous && (!stored || previous.cap !== effectiveCap)) {
-        await writeStateAtomically(stateFile, {
-          ...previous,
-          cap: effectiveCap,
-          updatedAt: timestamp,
-        });
-      }
-      throw new ConvergeAttemptBudgetExceededError(target, attemptsUsed, effectiveCap);
-    }
 
     const attempt = attemptsUsed + 1;
     const state: ConvergeAttemptState = {
+      ...previous,
       version: STATE_VERSION,
       target,
-      cap: effectiveCap,
       migratedAttempts: previous?.migratedAttempts ?? 0,
       attemptsUsed: attempt,
       attempts: [
@@ -619,14 +571,14 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
       updatedAt: timestamp,
     };
     await writeStateAtomically(stateFile, state);
-    claim = { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile };
+    claim = { target, attempt, attemptsUsed: attempt, stateFile };
   } catch (err) {
     claimError = err;
   }
 
   let releaseError: unknown;
   try {
-    await releaseOwnedLock(lockFile, lockOwner);
+    await releaseConvergeStateLock(lockFile, lockOwner);
   } catch (err) {
     releaseError = err;
   }
@@ -636,10 +588,6 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
       const claimMessage = claimError instanceof Error ? claimError.message : String(claimError);
       const releaseMessage =
         releaseError instanceof Error ? releaseError.message : String(releaseError);
-      // A cap refusal alone is exit 2, but a simultaneous release failure
-      // means the accounting lock is unhealthy. Classify the combined outcome
-      // as infrastructure failure so raising the cap is never suggested as a
-      // remedy for a stranded lock.
       throw new ConvergeAttemptStateError(
         `${claimMessage} Lock release also failed: ${releaseMessage}`,
         { cause: releaseError }
@@ -655,7 +603,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     const releaseMessage =
       releaseError instanceof Error ? releaseError.message : String(releaseError);
     claim.warning =
-      `Attempt ${claim.attempt}/${claim.cap} is durably recorded, but lock release failed: ` +
+      `Attempt ${claim.attempt} is durably recorded, but lock release failed: ` +
       `${releaseMessage} Do not retry this claim; the review may proceed.`;
   }
   return claim;
@@ -688,6 +636,6 @@ export async function resolveGitCommonDir(cwd = process.cwd()): Promise<string> 
   }
   // Worktrees may spell the same directory through a symlinked system path
   // (macOS commonly returns /var from one checkout and /private/var from
-  // another). Canonicalize it so one repository cannot acquire two budgets.
+  // another). Canonicalize it so one repository cannot acquire two state paths.
   return realpath(isAbsolute(value) ? value : resolve(cwd, value));
 }
