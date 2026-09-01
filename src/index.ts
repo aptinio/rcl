@@ -300,6 +300,7 @@ program
           round,
           findings: report.findings,
         });
+        if (result.warning) console.error(chalk.yellow(result.warning));
 
         const classified = result.findings.map((f) => ({
           identity: f.identity,
@@ -421,12 +422,13 @@ program
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
-        const { entries: updated, resolution } = await recordVerdicts({
+        const { entries: updated, resolution, warning } = await recordVerdicts({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
           verdicts,
         });
+        if (warning) console.error(chalk.yellow(warning));
         // Feed the cross-run precision history (RCL-27) — fail-soft, the
         // verdicts above are already durably recorded.
         try {

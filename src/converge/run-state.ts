@@ -17,8 +17,9 @@ import {
  * Per-converge-run state (RCL-24): durable round sequencing and the cross-round
  * finding ledger (identity, verdicts, suppression). Lives next to attempt
  * telemetry in the repository's common git dir — durable across
- * sessions, repo-scoped, not world-writable. The converge target lock
- * serializes writers per target at the workflow level.
+ * sessions, repo-scoped, not world-writable. An internal per-target lock
+ * serializes each read-modify-write even when callers bypass the workflow's
+ * broader converge target lock.
  */
 
 const STATE_VERSION = 1;
@@ -99,6 +100,7 @@ export interface AnnotatedRoundFinding {
 export interface RoundReport {
   counts: RoundCounts;
   findings: AnnotatedRoundFinding[];
+  warning?: string;
 }
 
 function stateBaseName(target: string): string {
@@ -111,7 +113,7 @@ export function convergeRunStatePath(gitCommonDir: string, target: string): stri
   return join(resolve(gitCommonDir), STATE_DIR, `${stateBaseName(target)}.json`);
 }
 
-async function withRunStateLock<T>(
+export async function withRunStateLock<T extends { warning?: string }>(
   gitCommonDir: string,
   target: string,
   action: () => Promise<T>
@@ -165,11 +167,14 @@ async function withRunStateLock<T>(
     throw actionError;
   }
   if (releaseError !== undefined) {
-    throw new ConvergeRunStateError(
-      `Converge run state was persisted but its lock could not be released: ${lockFile}. ` +
-        'Do not retry automatically.',
-      { cause: releaseError }
-    );
+    const releaseMessage =
+      releaseError instanceof Error ? releaseError.message : String(releaseError);
+    return {
+      ...(result as T),
+      warning:
+        `Converge run state was persisted, but lock release failed: ${releaseMessage} ` +
+        'Do not retry this operation; continue from the persisted state.',
+    };
   }
   return result as T;
 }
@@ -430,6 +435,7 @@ export interface RoundResolution {
 
 export interface RecordVerdictsResult {
   entries: FindingEntry[];
+  warning?: string;
   /**
    * Present only when the verdicts belong to the most recently processed
    * round; verdicts recorded against older rounds make no resolution claim.

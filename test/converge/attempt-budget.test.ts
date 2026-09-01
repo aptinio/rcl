@@ -29,6 +29,22 @@ async function tempGitDir(): Promise<string> {
   return dir;
 }
 
+async function seedFormerBoundary(gitCommonDir: string, target: string): Promise<void> {
+  await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
+  await writeFile(
+    convergeAttemptStatePath(gitCommonDir, target),
+    `${JSON.stringify({
+      version: 2,
+      target,
+      cap: 20,
+      migratedAttempts: 20,
+      attemptsUsed: 20,
+      attempts: [],
+      updatedAt: '2026-08-15T12:00:00Z',
+    })}\n`
+  );
+}
+
 async function exitedChildPid(): Promise<number> {
   const child = spawn(process.execPath, ['-e', '']);
   const pid = child.pid;
@@ -99,8 +115,9 @@ describe('convergence attempt telemetry', () => {
 
   it('records every claim beyond the former 20-attempt boundary', async () => {
     const gitCommonDir = await tempGitDir();
+    await seedFormerBoundary(gitCommonDir, 'repo-7559');
 
-    for (let attempt = 1; attempt <= 25; attempt++) {
+    for (let attempt = 21; attempt <= 25; attempt++) {
       await expect(claimConvergeAttempt({ gitCommonDir, target: 'repo-7559' })).resolves.toMatchObject({
         attempt,
         attemptsUsed: attempt,
@@ -132,6 +149,7 @@ describe('convergence attempt telemetry', () => {
     expect(claim).not.toHaveProperty('cap');
     expect(await loadConvergeAttemptState(gitCommonDir, 'rcl-18')).toMatchObject({
       target: 'rcl-18',
+      cap: 1,
       migratedAttempts: 1,
       attemptsUsed: 2,
       attempts: [expect.objectContaining({ attempt: 2 })],
@@ -140,9 +158,7 @@ describe('convergence attempt telemetry', () => {
 
   it('serializes concurrent starters above the former limit without losing claims', async () => {
     const gitCommonDir = await tempGitDir();
-    for (let attempt = 1; attempt <= 20; attempt++) {
-      await claimConvergeAttempt({ gitCommonDir, target: 'repo-7559' });
-    }
+    await seedFormerBoundary(gitCommonDir, 'repo-7559');
     const claims = await Promise.allSettled(
       Array.from({ length: 12 }, () =>
         claimConvergeAttempt({ gitCommonDir, target: 'repo-7559', lockRetryMs: 1 })
@@ -160,9 +176,7 @@ describe('convergence attempt telemetry', () => {
 
   it('serializes independent processes above the former limit', async () => {
     const gitCommonDir = await tempGitDir();
-    for (let attempt = 1; attempt <= 20; attempt++) {
-      await claimConvergeAttempt({ gitCommonDir, target: 'cross-process' });
-    }
+    await seedFormerBoundary(gitCommonDir, 'cross-process');
     const results = await Promise.all(
       Array.from({ length: 4 }, () => runClaimProcess(gitCommonDir, 'cross-process'))
     );

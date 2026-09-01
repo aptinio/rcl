@@ -17,6 +17,8 @@ describe('generated skill files', () => {
   it('renders every placeholder — no markers survive into the output', () => {
     for (const { path, content } of renderAll() as Rendered[]) {
       expect(content, path).not.toMatch(/\{\{[#/]?(PREFIX|DIR|claude|codex)\}?\}/);
+      expect(content, path).not.toContain('--max-attempts');
+      expect(content, path).not.toContain('--max-rounds');
     }
   });
 
@@ -73,7 +75,7 @@ describe('generated skill files', () => {
       expect(content, path).not.toMatch(/\b(?:15|20|99)[ -](?:round|attempt)/i);
       expect(content, path).toMatch(/counts? (?:are|remain) telemetry/i);
       expect(content, path).toMatch(/convergence or a genuine blocker/i);
-      expect(content, path).toMatch(/Exit 3 is an accounting\/infrastructure failure/i);
+      expect(content, path).toMatch(/exit 3 .*accounting\/infrastructure failure/i);
       expect(content, path).toMatch(/Never terminate a live council/i);
       expect(content, path).toContain('failed to remove stale review artifacts');
       if (normalizedPath.includes('/.claude/')) {

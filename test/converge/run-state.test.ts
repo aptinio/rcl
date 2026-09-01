@@ -8,6 +8,7 @@ import {
   recordVerdicts,
   loadConvergeRunState,
   ConvergeRunStateError,
+  withRunStateLock,
 } from '../../src/converge/run-state.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 
@@ -51,6 +52,18 @@ function finding(over: Partial<ConsensusFinding> & { models?: string[] } = {}): 
 }
 
 describe('round telemetry (RCL-35)', () => {
+  it('returns a persisted result with a warning when only lock release fails', async () => {
+    const result = await withRunStateLock(dir, 'release-warning', async () => {
+      await rm(`${convergeRunStatePath(dir, 'release-warning')}.lock`);
+      return { persisted: true };
+    });
+
+    expect(result).toMatchObject({
+      persisted: true,
+      warning: expect.stringContaining('persisted'),
+    });
+  });
+
   it('accepts contiguous rounds beyond the former default and hard boundaries', async () => {
     for (let round = 1; round <= 101; round++) {
       await processRoundReport({
@@ -92,6 +105,7 @@ describe('round telemetry (RCL-35)', () => {
       })
     ).resolves.toMatchObject({ counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
     const state = await loadConvergeRunState(dir, 'historical');
+    expect(state?.roundCap).toBe(15);
     expect(state?.rounds).toHaveLength(100);
     expect(state?.rounds.at(-1)?.round).toBe(100);
   });

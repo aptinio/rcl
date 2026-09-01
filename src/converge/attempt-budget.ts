@@ -559,7 +559,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
 
     const attempt = attemptsUsed + 1;
     const state: ConvergeAttemptState = {
-      ...previous,
+      ...(previous?.cap !== undefined ? { cap: previous.cap } : {}),
       version: STATE_VERSION,
       target,
       migratedAttempts: previous?.migratedAttempts ?? 0,
