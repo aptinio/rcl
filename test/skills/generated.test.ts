@@ -80,9 +80,14 @@ describe('generated skill files', () => {
         /\b\d+\s+(?:more\s+)?(?:evidence\s+)?(?:rounds?|attempts?)\b.{0,40}\bstop\b/i
       );
       expect(content, path).toMatch(/counts? (?:are|remain) telemetry/i);
+      expect(content, path).toContain(
+        'no numerical count, cost, or elapsed-time threshold stops a healthy loop or requires renewed consent'
+      );
       expect(content, path).toMatch(/convergence or a genuine blocker/i);
       expect(content, path).toMatch(/exit 3 .*accounting\/infrastructure failure/i);
       expect(content, path).toContain('Never retry the claim automatically');
+      expect(content, path).toContain('Never advance `<R>` past a failed `converge-report`');
+      expect(content, path).toContain('Never advance the loop past a failed `converge-verdict`');
       expect(content, path).toMatch(/Never terminate a live council/i);
       expect(content, path).toContain('failed to remove stale review artifacts');
       if (normalizedPath.includes('/.claude/')) {

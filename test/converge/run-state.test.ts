@@ -62,6 +62,7 @@ describe('round telemetry (RCL-35)', () => {
       persisted: true,
       warning: expect.stringContaining('persisted'),
     });
+    expect(result.warning).not.toContain('attempt lock');
   });
 
   it('rejects a persisted result when lock ownership changed before release', async () => {
@@ -102,6 +103,7 @@ describe('round telemetry (RCL-35)', () => {
       });
     }
     const state = await loadConvergeRunState(dir, 't1');
+    expect(state).not.toHaveProperty('roundCap');
     expect(state?.rounds).toHaveLength(101);
     expect(state?.rounds.at(-1)?.round).toBe(101);
   });

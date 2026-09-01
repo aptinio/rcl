@@ -56,7 +56,7 @@ Order matters: the symlink and ownership checks run **before** `chmod`, because 
 
 ### 1. Resolve the review target
 
-If `$ARGUMENTS` contains a standalone positional PR token — `PR#N`, `#N`, or an all-digit token — use that as the PR number and proceed to step 1a. Consume named flags and their values first: the `2` in `--roles reviewer-2` or in `--spec specs/v2.md` is part of a flag value, never a PR number.
+If `$ARGUMENTS` contains a standalone positional PR token — `PR#N`, `#N`, or an all-digit token — use that as the PR number and proceed to step 1a. Consume named flags and their values before positional matching: any token consumed as a flag value is never a PR number, even if it is all digits.
 Otherwise, detect the current branch's PR:
 
 ```bash

@@ -134,8 +134,9 @@ export async function withRunStateLock<T extends { warning?: string }>(
       owner
     );
   } catch (err) {
+    const causeMessage = err instanceof Error ? err.message : String(err);
     throw new ConvergeRunStateError(
-      `Could not acquire converge run state lock: ${lockFile}`,
+      `Could not acquire converge run state lock: ${lockFile}. ${causeMessage}`,
       { cause: err }
     );
   }

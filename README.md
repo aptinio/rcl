@@ -187,7 +187,8 @@ local safety mechanism, not a tamper-proof store: deliberately deleting
 `.git/rcl-converge-attempts` discards telemetry and is unsupported. Historical
 state containing a `cap` field loads in place and continues uncapped. The old
 `--max-attempts` option is accepted as an ignored, hidden compatibility no-op;
-it cannot reinstate a stopping boundary.
+it cannot reinstate a stopping boundary and emits a deprecation warning when
+used.
 
 ```bash
 rcl converge-attempt --target owner-repo-123
@@ -211,7 +212,8 @@ genuinely new evidence). The call enforces strict contiguous round sequencing
 but no numerical stopping limit. Historical state containing `roundCap` loads
 in place and continues uncapped. The old `--max-rounds` option is accepted as
 an ignored, hidden compatibility no-op; it cannot reinstate a stopping
-boundary. State and sequencing failures exit 3.
+boundary and emits a deprecation warning when used. State and sequencing
+failures exit 3.
 
 `converge-verdict` records triage outcomes per finding identity —
 `--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which

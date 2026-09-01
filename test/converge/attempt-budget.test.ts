@@ -109,6 +109,7 @@ describe('convergence attempt telemetry', () => {
         { attempt: 2, pid: 202, source: 'claim' },
       ],
     });
+    expect(state).not.toHaveProperty('cap');
     expect(first).not.toHaveProperty('cap');
     expect(second).not.toHaveProperty('cap');
   });

@@ -210,11 +210,19 @@ program
   .action(
     async (opts: {
       target?: string | boolean;
+      maxAttempts?: string | boolean;
       json?: boolean;
     }) => {
       try {
         if (typeof opts.target !== 'string' || opts.target.trim() === '') {
           throw new ConvergeAttemptStateError('--target is required.');
+        }
+        if (opts.maxAttempts !== undefined) {
+          console.error(
+            chalk.yellow(
+              '--max-attempts is deprecated and ignored; attempt counts are telemetry only.'
+            )
+          );
         }
         const claim = await claimConvergeAttempt({
           gitCommonDir: await resolveGitCommonDir(),
@@ -269,6 +277,7 @@ program
       target?: string | boolean;
       report?: string | boolean;
       round?: string | boolean;
+      maxRounds?: string | boolean;
       json?: boolean;
     }) => {
       try {
@@ -277,6 +286,11 @@ program
         }
         if (typeof opts.report !== 'string' || opts.report.trim() === '') {
           throw new ConvergeRunStateError('--report is required.');
+        }
+        if (opts.maxRounds !== undefined) {
+          console.error(
+            chalk.yellow('--max-rounds is deprecated and ignored; round counts are telemetry only.')
+          );
         }
         const round = typeof opts.round === 'string' ? Number(opts.round) : NaN;
         if (!Number.isSafeInteger(round) || round < 1) {

@@ -512,13 +512,13 @@ export async function releaseConvergeStateLock(
   if (!current) {
     throw new ConvergeStateLockOwnershipError(
       'missing',
-      `Convergence attempt lock disappeared unexpectedly: ${lockFile}.`
+      `Convergence state lock disappeared unexpectedly: ${lockFile}.`
     );
   }
   if (current.owner.token !== owner.token) {
     throw new ConvergeStateLockOwnershipError(
       'changed',
-      `Convergence attempt lock ownership changed unexpectedly: ${lockFile}. ` +
+      `Convergence state lock ownership changed unexpectedly: ${lockFile}. ` +
         'Refusing to remove a lock that may belong to another process.'
     );
   }

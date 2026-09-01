@@ -62,6 +62,8 @@ describe('converge-attempt CLI', () => {
 
     expect(first.status).toBe(0);
     expect(second.status).toBe(0);
+    expect(first.stderr).toContain('--max-attempts is deprecated and ignored');
+    expect(second.stderr).toContain('--max-attempts is deprecated and ignored');
     expect(JSON.parse(first.stdout)).toMatchObject({ attempt: 1, attemptsUsed: 1 });
     expect(JSON.parse(second.stdout)).toMatchObject({ attempt: 2, attemptsUsed: 2 });
     expect(JSON.parse(second.stdout)).not.toHaveProperty('cap');
@@ -72,6 +74,7 @@ describe('converge-attempt CLI', () => {
     const result = runConvergeAttempt(['--target', 'rcl-test', '--max-attempts'], repository);
 
     expect(result.status).toBe(0);
+    expect(result.stderr).toContain('--max-attempts is deprecated and ignored');
     expect(JSON.parse(result.stdout)).toMatchObject({ attempt: 1, attemptsUsed: 1 });
   });
 
@@ -151,7 +154,7 @@ describe('converge-report CLI', () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
+    expect(result.stderr).toContain('--max-rounds is deprecated and ignored');
     expect(JSON.parse(result.stdout)).toMatchObject({ target: 'rcl-cli-report', round: 100 });
     expect(JSON.parse(result.stdout)).not.toHaveProperty('roundCap');
   });
