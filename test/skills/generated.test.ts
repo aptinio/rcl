@@ -73,9 +73,16 @@ describe('generated skill files', () => {
       expect(content, path).not.toContain('--max-rounds');
       expect(content, path).not.toContain('--max-attempts');
       expect(content, path).not.toMatch(/\b(?:15|20|99)[ -](?:round|attempt)/i);
+      expect(content, path).not.toMatch(
+        /\bstop\b.{0,40}\b\d+\s+(?:more\s+)?(?:evidence\s+)?(?:rounds?|attempts?)\b/i
+      );
+      expect(content, path).not.toMatch(
+        /\b\d+\s+(?:more\s+)?(?:evidence\s+)?(?:rounds?|attempts?)\b.{0,40}\bstop\b/i
+      );
       expect(content, path).toMatch(/counts? (?:are|remain) telemetry/i);
       expect(content, path).toMatch(/convergence or a genuine blocker/i);
       expect(content, path).toMatch(/exit 3 .*accounting\/infrastructure failure/i);
+      expect(content, path).toContain('Never retry the claim automatically');
       expect(content, path).toMatch(/Never terminate a live council/i);
       expect(content, path).toContain('failed to remove stale review artifacts');
       if (normalizedPath.includes('/.claude/')) {

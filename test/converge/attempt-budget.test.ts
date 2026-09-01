@@ -137,6 +137,7 @@ describe('convergence attempt telemetry', () => {
         version: 2,
         target: 'rcl-18',
         cap: 1,
+        rogue: 'discard-me',
         migratedAttempts: 1,
         attemptsUsed: 1,
         attempts: [],
@@ -147,13 +148,15 @@ describe('convergence attempt telemetry', () => {
     const claim = await claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' });
     expect(claim).toMatchObject({ attempt: 2, attemptsUsed: 2, stateFile });
     expect(claim).not.toHaveProperty('cap');
-    expect(await loadConvergeAttemptState(gitCommonDir, 'rcl-18')).toMatchObject({
+    const continuedState = await loadConvergeAttemptState(gitCommonDir, 'rcl-18');
+    expect(continuedState).toMatchObject({
       target: 'rcl-18',
       cap: 1,
       migratedAttempts: 1,
       attemptsUsed: 2,
       attempts: [expect.objectContaining({ attempt: 2 })],
     });
+    expect(continuedState).not.toHaveProperty('rogue');
   });
 
   it('serializes concurrent starters above the former limit without losing claims', async () => {

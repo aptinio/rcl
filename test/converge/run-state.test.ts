@@ -64,6 +64,34 @@ describe('round telemetry (RCL-35)', () => {
     });
   });
 
+  it('rejects a persisted result when lock ownership changed before release', async () => {
+    await expect(
+      withRunStateLock(dir, 'release-stolen', async () => {
+        await writeFile(
+          `${convergeRunStatePath(dir, 'release-stolen')}.lock`,
+          `${JSON.stringify({
+            pid: process.pid,
+            claimedAt: new Date().toISOString(),
+            token: '00000000-0000-4000-8000-000000000001',
+          })}\n`
+        );
+        return { persisted: true };
+      })
+    ).rejects.toThrow(ConvergeRunStateError);
+  });
+
+  it('ignores the deprecated library round override above the former hard boundary', async () => {
+    await expect(
+      processRoundReport({
+        gitCommonDir: dir,
+        target: 'library-override',
+        round: 100,
+        maxRounds: 2,
+        findings: [],
+      })
+    ).resolves.toMatchObject({ counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
+  });
+
   it('accepts contiguous rounds beyond the former default and hard boundaries', async () => {
     for (let round = 1; round <= 101; round++) {
       await processRoundReport({

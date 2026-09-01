@@ -10,6 +10,7 @@ import {
 import {
   acquireConvergeStateLock,
   releaseConvergeStateLock,
+  ConvergeStateLockOwnershipError,
   type ConvergeStateLockOwner,
 } from './attempt-budget.js';
 
@@ -167,6 +168,16 @@ export async function withRunStateLock<T extends { warning?: string }>(
     throw actionError;
   }
   if (releaseError !== undefined) {
+    if (
+      releaseError instanceof ConvergeStateLockOwnershipError &&
+      releaseError.reason === 'changed'
+    ) {
+      throw new ConvergeRunStateError(
+        'Converge run state was persisted, but lock ownership changed before release; ' +
+          'another writer may have replaced it. Reload the persisted state before continuing.',
+        { cause: releaseError }
+      );
+    }
     const releaseMessage =
       releaseError instanceof Error ? releaseError.message : String(releaseError);
     return {

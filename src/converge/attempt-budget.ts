@@ -57,6 +57,16 @@ export class ConvergeAttemptStateError extends Error {
   }
 }
 
+export class ConvergeStateLockOwnershipError extends ConvergeAttemptStateError {
+  constructor(
+    readonly reason: 'missing' | 'changed',
+    message: string
+  ) {
+    super(message);
+    this.name = 'ConvergeStateLockOwnershipError';
+  }
+}
+
 interface ClaimOptions {
   gitCommonDir: string;
   target: string;
@@ -499,8 +509,15 @@ export async function releaseConvergeStateLock(
   owner: ConvergeStateLockOwner
 ): Promise<void> {
   const current = await readLockSnapshot(lockFile);
-  if (!current || current.owner.token !== owner.token) {
-    throw new ConvergeAttemptStateError(
+  if (!current) {
+    throw new ConvergeStateLockOwnershipError(
+      'missing',
+      `Convergence attempt lock disappeared unexpectedly: ${lockFile}.`
+    );
+  }
+  if (current.owner.token !== owner.token) {
+    throw new ConvergeStateLockOwnershipError(
+      'changed',
       `Convergence attempt lock ownership changed unexpectedly: ${lockFile}. ` +
         'Refusing to remove a lock that may belong to another process.'
     );
